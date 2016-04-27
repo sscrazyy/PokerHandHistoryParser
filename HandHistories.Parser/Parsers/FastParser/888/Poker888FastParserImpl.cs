@@ -13,6 +13,7 @@ using HandHistories.Parser.Utils.Time;
 using HandHistories.Parser.Utils.Extensions;
 using HandHistories.Parser.Utils.Strings;
 using System.Globalization;
+using HandHistories.Parser.Utils.Uncalled;
 
 namespace HandHistories.Parser.Parsers.FastParser._888
 {
@@ -35,6 +36,11 @@ namespace HandHistories.Parser.Parsers.FastParser._888
             get { return true; }
         }
 
+        public override bool RequiresUncalledBetFix
+        {
+            get { return true; }
+        }
+
         private static readonly NumberFormatInfo NumberFormatInfo = new NumberFormatInfo
         {
             NegativeSign = "-",
@@ -51,13 +57,13 @@ namespace HandHistories.Parser.Parsers.FastParser._888
             //List<string> splitUpHands = rawHandHistories.Split(new char[] {'▄'}, StringSplitOptions.RemoveEmptyEntries).ToList();
             //return splitUpHands.Where(s => s.Equals("\r\n") == false);
 
-            return rawHandHistories.LazyStringSplit("\n\n").Where(s => string.IsNullOrWhiteSpace(s) == false && s.Equals("\r\n") == false);
+            return rawHandHistories.LazyStringSplit("\n\n").Where(s => !string.IsNullOrWhiteSpace(s) && !s.Equals("\r\n") && !s.StartsWith("#Game No ", StringComparison.Ordinal));
         }
 
         private static readonly Regex DealerPositionRegex = new Regex(@"(?<=Seat )\d+", RegexOptions.Compiled);
         protected override int ParseDealerPosition(string[] handLines)
         {
-            return Int32.Parse(DealerPositionRegex.Match(handLines[4]).Value);
+            return Int32.Parse(DealerPositionRegex.Match(handLines[3]).Value);
         }
 
         private static readonly Regex DateLineRegex = new Regex(@"\d+ \d+ \d+ \d+\:\d+\:\d+", RegexOptions.Compiled);
@@ -65,7 +71,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
         protected override DateTime ParseDateUtc(string[] handLines)
         {
             //Date looks like: 04 02 2012 23:59:48
-            string dateString = DateLineRegex.Match(handLines[2]).Value;
+            string dateString = DateLineRegex.Match(handLines[1]).Value;
             //Change string so it becomes 2012-02-04 23:59:48
             dateString = DateRegex.Replace(dateString, "$3-$2-$1 ");
 
@@ -81,10 +87,14 @@ namespace HandHistories.Parser.Parsers.FastParser._888
             return PokerFormat.CashGame;
         }
 
-        private static readonly Regex HandIdRegex = new Regex(@"(?<=#Game No \: )\d+", RegexOptions.Compiled);
         protected override long ParseHandId(string[] handLines)
         {
-            return long.Parse(HandIdRegex.Match(handLines[0]).Value);
+            string line = handLines[0];
+            int endIndex = line.LastIndexOf(' ');
+            int startIndex = line.LastIndexOf(' ', endIndex - 1);
+
+            string idString = line.Substring(startIndex, endIndex - startIndex);
+            return long.Parse(idString);
         }
 
         protected override long ParseTournamentId(string[] handLines)
@@ -96,7 +106,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
         protected override string ParseTableName(string[] handLines)
         {
             //"Table Athens 10 Max (Real Money)" -> "Athens"
-            var tableName = TableNameRegex.Match(handLines[3]).Value;
+            var tableName = TableNameRegex.Match(handLines[2]).Value;
             tableName = tableName.Substring(0, tableName.Length - 19).TrimEnd();
             return tableName;
         }
@@ -104,7 +114,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
         private static readonly Regex NumPlayersRegex = new Regex(@"(?<=Total number of players : )\d+", RegexOptions.Compiled);
         protected override SeatType ParseSeatType(string[] handLines)
         {
-            int seatCount = Int32.Parse(NumPlayersRegex.Match(handLines[5]).Value);
+            int seatCount = ParsePlayerCount(handLines);
 
             if (seatCount <= 2)
             {
@@ -127,7 +137,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
         private static readonly Regex GameTypeRegex = new Regex(@"(?<=Blinds ).*(?= - )", RegexOptions.Compiled);
         protected override GameType ParseGameType(string[] handLines)
         {
-            string gameTypeString = GameTypeRegex.Match(handLines[2]).Value;
+            string gameTypeString = GameTypeRegex.Match(handLines[1]).Value;
             gameTypeString = gameTypeString.Replace(" Jackpot table", "");
             switch (gameTypeString)
             {
@@ -161,7 +171,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
 
             // the min buyin for standard table is > 30bb, so this should work in most cases
             // furthermore if on a regular table the average stack is < 17.5, the play is just like on a push fold table and vice versa
-            bool isjackPotTable = handLines[2].Contains(" Jackpot table");
+            bool isjackPotTable = handLines[1].Contains(" Jackpot table");
            
             var playerList = ParsePlayers(handLines);
             var limit = ParseLimit(handLines);
@@ -201,7 +211,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
 
         protected override Limit ParseLimit(string[] handLines)
         {
-            string line = handLines[2];
+            string line = handLines[1];
 
             int LimitEndIndex = line.IndexOf(" Blinds", StringComparison.Ordinal);
             string limitString = line.Remove(LimitEndIndex)
@@ -227,7 +237,8 @@ namespace HandHistories.Parser.Parsers.FastParser._888
 
         public override bool IsValidHand(string[] handLines)
         {
-            return handLines[handLines.Length - 1].Contains(" collected ");
+            const string Collected = " collected ";
+            return handLines[handLines.Length - 1].Contains(Collected) || handLines[handLines.Length - 2].Contains(Collected);
         }
 
         public override bool IsValidOrCancelledHand(string[] handLines, out bool isCancelled)
@@ -401,7 +412,7 @@ namespace HandHistories.Parser.Parsers.FastParser._888
                 throw new HandActionException(handLine, "Unknown handline.");
             }
 
-            return FixUncalledBets(handActions, null, null);
+            return handActions;//FixUncalledBets(handActions, null, null);
         }
 
         private static decimal ParseAmount(string amountString)
@@ -432,13 +443,14 @@ namespace HandHistories.Parser.Parsers.FastParser._888
 
         protected override PlayerList ParsePlayers(string[] handLines)
         {
-            int seatCount = Int32.Parse(NumPlayersRegex.Match(handLines[5]).Value);
+            const int PlayerListStartIndex = 5;
+            int seatCount = ParsePlayerCount(handLines);
 
             PlayerList playerList = new PlayerList();
 
             for (int i = 0; i < seatCount; i++)
             {
-                string handLine = handLines[6 + i];
+                string handLine = handLines[PlayerListStartIndex + i];
 
                 // Expected format:
                 //  Seat 1: Velmonio ( $1.05 )
@@ -453,6 +465,26 @@ namespace HandHistories.Parser.Parsers.FastParser._888
                 playerList.Add(new Player(playerName, amount, seat));
             }
 
+            int heroCardsIndex = GetHeroCardsIndex(handLines, PlayerListStartIndex + seatCount);
+
+            if (heroCardsIndex != -1)
+            {
+                string heroCardsLine = handLines[heroCardsIndex];
+                if (heroCardsLine[heroCardsLine.Length - 1] == ']' &&
+                    heroCardsLine.StartsWith("Dealt to ", StringComparison.Ordinal))
+                {
+                    int openSquareIndex = heroCardsLine.LastIndexOf('[');
+
+                    string cards = heroCardsLine.Substring(openSquareIndex + 2, heroCardsLine.Length - openSquareIndex - 2 - 2);
+                    HoleCards holeCards = HoleCards.FromCards(cards.Replace(",", "").Replace(" ", ""));
+
+                    string playerName = heroCardsLine.Substring(9, openSquareIndex - 1 - 9);
+
+                    Player player = playerList.First(p => p.PlayerName.Equals(playerName));
+                    player.HoleCards = holeCards;
+                }
+            }
+            
             // Add hole-card info
             for (int i = handLines.Length - 2; i >= 0; i--)
             {
@@ -481,7 +513,26 @@ namespace HandHistories.Parser.Parsers.FastParser._888
                 }
             }
 
-                return playerList;
+            return playerList;
+        }
+
+        private static int ParsePlayerCount(string[] handLines)
+        {
+            int seatCount = Int32.Parse(NumPlayersRegex.Match(handLines[4]).Value);
+            return seatCount;
+        }
+
+        static int GetHeroCardsIndex(string[] handLines, int startIndex)
+        {
+            for (int i = startIndex; i < handLines.Length; i++)
+            {
+                string line = handLines[i];
+                if (line[0] == '*' && line[line.Length - 1] == '*')
+                {
+                    return i + 1;
+                }
+            }
+            return -1;
         }
 
         protected override BoardCards ParseCommunityCards(string[] handLines)
@@ -535,97 +586,6 @@ namespace HandHistories.Parser.Parsers.FastParser._888
                 }
             }
             return null;
-        }
-
-        private List<HandAction> FixUncalledBets(List<HandAction> handActions, decimal? totalPot, decimal? rake)
-        {
-            // Pacific does not correctly return uncalled bets, sometimes declaring them as winnings
-            // as we calculate the rake manually, we need to make sure uncalledbets are declared correctly
-
-            // this fix only takes place when the TotalPot - Rake != Winnings
-            if (totalPot != null && rake != null)
-            {
-                if (totalPot - rake == handActions.Where(a => a.IsWinningsAction).Sum(a => a.Amount))
-                    return handActions;
-            }
-
-            if (handActions.Sum(a => a.Amount) == 0m)
-                return handActions;
-
-
-            var playerActions = handActions.Where(a => !a.IsWinningsAction
-                                                  && !a.HandActionType.Equals(HandActionType.SHOW)
-                                                  && !a.HandActionType.Equals(HandActionType.MUCKS))
-                                         .GroupBy(p => p.PlayerName)
-                                         .Select(s => s.Select(a => a).ToList());
-
-            HandAction handActionToAdd = null;
-            foreach (var actions in playerActions)
-            {
-                var lastAction = actions[actions.Count - 1];
-
-                if (lastAction.HandActionType == HandActionType.BET || lastAction.HandActionType == HandActionType.RAISE)
-                {
-                    var totalInvestedAmount = handActions.Where(a => a.PlayerName.Equals(lastAction.PlayerName) && !a.IsWinningsAction).Sum(a => a.Amount);
-
-                    var deadMoneyAction = handActions.FirstOrDefault(a => a.PlayerName.Equals(lastAction.PlayerName) && a.HandActionType.Equals(HandActionType.POSTS));
-
-                    if (deadMoneyAction != null && deadMoneyAction.Amount < handActions.First(a => a.HandActionType.Equals(HandActionType.BIG_BLIND)).Amount)
-                    {
-                        totalInvestedAmount -= handActions.First(a => a.HandActionType.Equals(HandActionType.SMALL_BLIND)).Amount;
-                    }
-
-
-                    var totalInvestedAmountsByOtherPlayers = handActions.Where(a => a.PlayerName != lastAction.PlayerName && !a.IsWinningsAction)
-                                                                        .GroupBy(a => a.PlayerName)
-                                                                        .Select(p => new
-                                                                                     {
-                                                                                         PlayerName = p.Key,
-                                                                                         Invested = p.Sum(x => x.Amount)
-                                                                                     });
-
-                    var totalInvestedAmountOtherPlayer = 0.0m;
-                    foreach (var investedByPlayer in totalInvestedAmountsByOtherPlayers)
-                    {
-                        var invested = investedByPlayer.Invested;
-                        deadMoneyAction = handActions.FirstOrDefault(a => a.PlayerName.Equals(investedByPlayer.PlayerName) && a.HandActionType.Equals(HandActionType.POSTS));
-
-                        if (deadMoneyAction != null && deadMoneyAction.Amount < handActions.First(a => a.HandActionType.Equals(HandActionType.BIG_BLIND)).Amount)
-                        {
-                            invested -= handActions.First(a => a.HandActionType.Equals(HandActionType.SMALL_BLIND)).Amount;
-                        }
-
-                        if (invested < totalInvestedAmountOtherPlayer)
-                        {
-                            totalInvestedAmountOtherPlayer = invested;
-                        }
-                    }
-
-
-                    if (totalInvestedAmountOtherPlayer > totalInvestedAmount)
-                    {
-                        var uncalledBet = Math.Abs(totalInvestedAmount - totalInvestedAmountOtherPlayer);
-
-                        // only add this if we don't have a similar WIN line
-                        var winAction = handActions.FirstOrDefault(h => h.PlayerName == lastAction.PlayerName
-                                                                     && h.HandActionType == HandActionType.WINS
-                                                                     && h.Amount == uncalledBet);
-
-                        if (winAction != null && handActions.Count(h => h.IsWinningsAction) > 1)
-                        {
-                            handActions.Remove(winAction);
-                        }
-
-                        handActionToAdd = (new HandAction(lastAction.PlayerName, HandActionType.UNCALLED_BET, uncalledBet, Street.Showdown));
-                    }
-                }
-            }
-
-            // only add the uncalled bet if we had a caller
-            if (handActionToAdd != null)
-                handActions.Add(handActionToAdd);
-
-            return handActions;
         }
     }
 }

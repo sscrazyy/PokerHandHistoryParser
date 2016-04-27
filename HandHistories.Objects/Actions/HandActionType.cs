@@ -2,6 +2,7 @@
 {
     public enum HandActionType
     {
+        UNKNOWN = 0,
         FOLD,
         CALL,
         CHECK,
@@ -23,7 +24,14 @@
         FIFTEEN_SECONDS_LEFT,
         FIVE_SECONDS_LEFT,
         MUCKS,
+        /// <summary>
+        /// POST that is added to your bet
+        /// </summary>
         POSTS,
+        /// <summary>
+        /// POST that is not added to your bet
+        /// </summary>
+        POSTS_DEAD,
         DISCONNECTED,
         RECONNECTED,
         STANDS_UP,
@@ -40,6 +48,5 @@
         GAME_CANCELLED,
         RABBIT,
         JACKPOTCONTRIBUTION,
-        UNKNOWN
     }
 }

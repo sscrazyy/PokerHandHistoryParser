@@ -9,6 +9,8 @@ using HandHistories.Parser.Parsers.FastParser.Base;
 using System.Globalization;
 using System.Linq;
 using HandHistories.Parser.Utils.FastParsing;
+using HandHistories.Parser.Utils.Extensions;
+using HandHistories.Objects.Hand;
 
 namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
 {
@@ -31,6 +33,11 @@ namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
         }
 
         public override bool RequiresTotalPotCalculation
+        {
+            get { return true; }
+        }
+
+        public override bool RequiresUncalledBetFix
         {
             get { return true; }
         }
@@ -62,6 +69,51 @@ namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
             return base.SplitHandsLines(handText)
                 .TakeWhile(p => !p.StartsWith("Game #", StringComparison.Ordinal) && !p.EndsWith(" starts.", StringComparison.Ordinal))
                 .ToArray();
+        }
+
+        public override IEnumerable<string> SplitUpMultipleHands(string rawHandHistories)
+        {
+            return SplitUpMultipleHandsToLines(rawHandHistories).Select(p => string.Join("\r\n", p));
+        }
+
+        public override IEnumerable<string[]> SplitUpMultipleHandsToLines(string rawHandHistories)
+        {
+            var allLines = rawHandHistories.LazyStringSplitFastSkip('\n', jump: 10, jumpAfter: 2);
+
+            List<string> handLines = new List<string>(50);
+
+            bool validHand = false;
+
+            foreach (var item in allLines)
+            {
+                if (!validHand)
+                {
+                    if (!item.StartsWith("***** Hand History", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+                    validHand = true;
+                }
+
+                string line = item.TrimEnd('\r', ' ');
+
+                if (string.IsNullOrWhiteSpace(line) || 
+                    (line.StartsWith("Game #", StringComparison.Ordinal) && line.EndsWith(" starts.", StringComparison.Ordinal)))
+                {
+                    if (handLines.Count > 0)
+                    {
+                        yield return handLines.ToArray();
+                        handLines = new List<string>(50);
+                    }
+                    continue;
+                }
+                handLines.Add(line);
+            }
+
+            if (handLines.Count > 0)
+            {
+                yield return handLines.ToArray();
+            }
         }
 
         protected override int ParseDealerPosition(string[] handLines)
@@ -780,6 +832,7 @@ namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
                 // leave the loop if we spot a summary/hand start of line
                 if (line.StartsWith("** "))
                 {
+                    lastLineRead = lineNumber;
                     break;
                 }
 
@@ -826,6 +879,26 @@ namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
                     }
                 }
                 
+            }
+
+            int heroCardsIndex = GetHeroCardsIndex(handLines, lastLineRead);
+
+            if (heroCardsIndex != -1)
+            {
+                string heroCardsLine = handLines[heroCardsIndex];
+                if (heroCardsLine[heroCardsLine.Length - 1] == ']' &&
+                    heroCardsLine.StartsWith("Dealt to ", StringComparison.Ordinal))
+                {
+                    int openSquareIndex = heroCardsLine.LastIndexOf('[');
+
+                    string cards = heroCardsLine.Substring(openSquareIndex + 3, heroCardsLine.Length - openSquareIndex - 3 - 2);
+                    HoleCards holeCards = HoleCards.FromCards(cards.Replace(" ", ""));
+
+                    string playerName = heroCardsLine.Substring(9, openSquareIndex - 1 - 9);
+
+                    Player player = playerList.First(p => p.PlayerName.Equals(playerName));
+                    player.HoleCards = holeCards;
+                }
             }
 
             // Looking for the showdown info which looks like this
@@ -879,6 +952,19 @@ namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
             }
 
             return playerList;
+        }
+
+        static int GetHeroCardsIndex(string[] handLines, int startIndex)
+        {
+            for (int i = startIndex; i < handLines.Length; i++)
+            {
+                string line = handLines[i];
+                if (line[0] == '*' && line[line.Length - 1] == '*')
+                {
+                    return i + 1;
+                }
+            }
+            return -1;
         }
 
         static int GetNameEndIndex(string line)
@@ -1017,6 +1103,11 @@ namespace HandHistories.Parser.Parsers.FastParser.PartyPoker
             }
 
             throw new HandActionException(string.Join(Environment.NewLine, handLines), "No cards was dealt");
+        }
+
+        protected override void FinalizeHandHistory(HandHistory Hand)
+        {
+            FixSitoutPlayers(Hand);
         }
     }
 }

@@ -13,6 +13,8 @@ using HandHistories.Parser.Parsers.Exceptions;
 using HandHistories.Parser.Parsers.FastParser.Base;
 using HandHistories.Parser.Utils.Strings;
 using System.Runtime.CompilerServices;
+using HandHistories.Objects.Hand;
+using System.Globalization;
 
 namespace HandHistories.Parser.Parsers.FastParser.Winning
 {
@@ -173,7 +175,7 @@ namespace HandHistories.Parser.Parsers.FastParser.Winning
             for (int i = start; i < handLines.Length; i++)
             {
                 string line = handLines[i];
-                if (line.IndexOf(" has big blind (") != -1)
+                if (line.EndsWith("received a card.", StringComparison.Ordinal))
                 {
                     return false;
                 }
@@ -564,36 +566,38 @@ namespace HandHistories.Parser.Parsers.FastParser.Winning
                 playerList.Add(new Player(playerName, decimal.Parse(stack, System.Globalization.CultureInfo.InvariantCulture), SeatNumber));
             }
 
+            //HandHistory format:
             //...
             //Player NoahSDsDad has small blind (2)
             //Player xx45809 sitting out
             //Player megadouche sitting out
             //Player xx59704 wait BB
-            CurrentLineIndex++;
-            for (int i = 0; i < handLines.Length; i++)
+
+            //Parsing Sitouts and HoleCards
+            for (int i = CurrentLineIndex; i < handLines.Length; i++)
             {
                 const int NameStartIndex = 7;
-                string sitOutLine = handLines[CurrentLineIndex + i];
+                string line = handLines[i];
 
                 bool receivingCards = false;
                 int NameEndIndex;
                 string playerName;
 
                 //Uncalled bet (20) returned to zz7
-                if (sitOutLine[0] == 'U')
+                if (line[0] == 'U')
                 {
                     break;
                 }
 
-                switch (sitOutLine[sitOutLine.Length - 1])
+                switch (line[line.Length - 1])
                 {
                     //Player bubblebubble received card: [2h]
                     case ']':
-                        //TODO: Parse cards here
-                        break;
+                        throw new Exception("This should not happen, if it does we need to fix it");
+                    
                     case '.':
                         //Player bubblebubble is timed out.
-                        if (sitOutLine[sitOutLine.Length - 2] == 't')
+                        if (line[line.Length - 2] == 't')
                         {
                             continue;
                         }
@@ -603,16 +607,16 @@ namespace HandHistories.Parser.Parsers.FastParser.Winning
                         continue;
                     case 'B':
                         //Player bubblebubble wait BB
-                        NameEndIndex = sitOutLine.Length - 8;//" wait BB".Length
-                        playerName = sitOutLine.Substring(NameStartIndex, NameEndIndex - NameStartIndex);
+                        NameEndIndex = line.Length - 8;//" wait BB".Length
+                        playerName = line.Substring(NameStartIndex, NameEndIndex - NameStartIndex);
                         playerList[playerName].IsSittingOut = true;
                         break;
                     case 't':
                         //Player xx45809 sitting out
-                        if (sitOutLine[sitOutLine.Length - 2] == 'u')
+                        if (line[line.Length - 2] == 'u')
                         {
-                            NameEndIndex = sitOutLine.Length - 12;//" sitting out".Length
-                            playerName = sitOutLine.Substring(NameStartIndex, NameEndIndex - NameStartIndex);
+                            NameEndIndex = line.Length - 12;//" sitting out".Length
+                            playerName = line.Substring(NameStartIndex, NameEndIndex - NameStartIndex);
                             if (playerName == "")//"Player  sitting out"
                             {
                                 continue;
@@ -623,9 +627,48 @@ namespace HandHistories.Parser.Parsers.FastParser.Winning
                         //Player TheKunttzz posts (0.25) as a dead bet
                         else continue;
                     default:
-                        throw new ArgumentException("Unhandled Line: " + sitOutLine);
+                        throw new ArgumentException("Unhandled Line: " + line);
                 }
                 if (receivingCards)
+                {
+                    CurrentLineIndex = i;
+                    break;
+                }
+            }
+
+            //Parse HoleCards
+            for (int i = CurrentLineIndex; i < handLines.Length; i++)
+            {
+                const int NameStartIndex = 7;
+                string line = handLines[i];
+                char endChar = line[line.Length - 1];
+
+                if (endChar == '.')
+                {
+                    continue;
+                }
+                else if (endChar == ']')
+                {
+                    int NameEndIndex = line.LastIndexOf(" rec", line.Length - 12, StringComparison.Ordinal);
+                    string playerName = line.Substring(NameStartIndex, NameEndIndex - NameStartIndex);
+
+                    char rank = line[line.Length - 3];
+                    char suit = line[line.Length - 2];
+
+                    var player = playerList[playerName];
+                    if (!player.hasHoleCards)
+                    {
+                        player.HoleCards = HoleCards.NoHolecards();
+                    }
+                    if (rank == '0')
+                    {
+                        rank = 'T';
+                    }
+
+                    player.HoleCards.AddCard(new Card(rank, suit));
+                    continue;
+                }
+                else
                 {
                     break;
                 }
@@ -660,7 +703,6 @@ namespace HandHistories.Parser.Parsers.FastParser.Winning
                         cards = cards.Replace("10", "T");
                         showdownPlayer.HoleCards = HoleCards.FromCards(cards);
                     }
-                   
                 }
             }
 
@@ -695,6 +737,35 @@ namespace HandHistories.Parser.Parsers.FastParser.Winning
             }
 
             throw new CardException(string.Empty, "Read through hand backwards and didn't find a board or summary.");
+        }
+
+        protected override void ParseExtraHandInformation(string[] handLines, HandHistorySummary handHistorySummary)
+        {
+            if (handHistorySummary.Cancelled)
+            {
+                return;
+            }
+
+            for (int i = handLines.Length - 1; i > 0; i--)
+            {
+                string line = handLines[i];
+                if (line.StartsWith("Pot", StringComparison.Ordinal))
+                {
+                    //Pot: 80. Rake 2
+                    const int PotStartIndex = 5;
+                    int PotEndIndex = line.IndexOf(' ', PotStartIndex) - 1;
+
+                    string TotalPotStr = line.Substring(PotStartIndex, PotEndIndex - PotStartIndex);
+
+                    handHistorySummary.TotalPot = decimal.Parse(TotalPotStr, CultureInfo.InvariantCulture);
+
+                    int RakeStartIndex = line.LastIndexOf(' ');
+                    string RakeStr = line.Substring(RakeStartIndex);
+
+                    handHistorySummary.Rake = decimal.Parse(RakeStr, CultureInfo.InvariantCulture);
+                    break;
+                }
+            }
         }
 
         protected override string ParseHeroName(string[] handlines)

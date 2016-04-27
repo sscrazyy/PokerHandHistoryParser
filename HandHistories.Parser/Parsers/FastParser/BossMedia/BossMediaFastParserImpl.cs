@@ -14,10 +14,13 @@ using HandHistories.Parser.Parsers.FastParser.Base;
 using HandHistories.Parser.Utils.Strings;
 using System.Globalization;
 using HandHistories.Parser.Utils.AllInAction;
+using HandHistories.Parser.Utils.FastParsing;
+using HandHistories.Parser.Utils.Extensions;
+using System.Net;
 
 namespace HandHistories.Parser.Parsers.FastParser.BossMedia
 {
-    sealed class BossMediaFastParserImpl : HandHistoryParserFastImpl
+    public sealed class BossMediaFastParserImpl : HandHistoryParserFastImpl
     {
         static readonly CultureInfo provider = CultureInfo.InvariantCulture;
 
@@ -31,9 +34,50 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             get { return true; }
         }
 
+        public override bool RequiresUncalledBetFix
+        {
+            get { return true; }
+        }
+
         public override IEnumerable<string> SplitUpMultipleHands(string rawHandHistories)
         {
-            return rawHandHistories.Split(new string[] { "<HISTORY " }, StringSplitOptions.None).Where(p => p.Length > 2 && p[1] != '?');
+            return rawHandHistories.Split(new string[] { "<HISTORY " }, StringSplitOptions.None)
+                .Where(p => p.Length > 2 && p[1] != '?')
+                .Select(p => "<HISTORY " + p);
+        }
+
+        public override IEnumerable<string[]> SplitUpMultipleHandsToLines(string rawHandHistories)
+        {
+            var allLines = rawHandHistories.Split('\n');
+
+            List<string> handLines = new List<string>(50);
+
+            bool handFound = false;
+
+            foreach (var item in allLines)
+            {
+                string line = item.TrimEnd('\r', ' ');
+
+                if (line.StartsWith("<HISTORY ", StringComparison.Ordinal))
+                {
+                    handFound = true;
+                    if (handLines.Count > 0)
+                    {
+                        yield return handLines.ToArray();
+                        handLines = new List<string>(50);
+                    }
+                }
+
+                if (handFound)
+	            {
+		            handLines.Add(line);
+                }
+            }
+
+            if (handLines.Count > 0)
+            {
+                yield return handLines.ToArray();
+            }
         }
 
         protected override int ParseDealerPosition(string[] handLines)
@@ -70,7 +114,23 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
         
         protected override PokerFormat ParsePokerFormat(string[] handLines)
         {
-            return PokerFormat.CashGame;
+            var format = GetXMLAttributeValue(handLines[0], "GAMEKIND");
+
+            switch (format)
+            {
+                case "GAMEKIND_CASH":
+                    return PokerFormat.CashGame;
+
+                case "GAMEKIND_SITGO":
+                    return PokerFormat.SitAndGo;
+
+                case "GAMEKIND_TOURNAMENT":
+                    return PokerFormat.MultiTableTournament;
+
+                default:
+                    throw new ArgumentOutOfRangeException("Unknown PokerFormat: " + format);
+            }
+
         }
 
         protected override long ParseHandId(string[] handLines)
@@ -158,7 +218,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
 
         protected override Buyin ParseBuyin(string[] handLines)
         {
-            throw new NotImplementedException();
+            return null;
         }
 
         public override bool IsValidHand(string[] handLines)
@@ -204,6 +264,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                             //HAND_BOARD
                             //HAND_DEAL
                             //HAND_BLINDS
+                            //HAND_ANTE
                             char handAction = Line[20]; //The 7th character is used for identification
                             switch (handAction)
                             {
@@ -215,6 +276,10 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                                 //HAND_DEAL - this is dealt with in ParsePlayers
                                 case 'E':
                                     continue;
+
+                                case 'N':
+                                    actions.Add(ParseAnte(Line));
+                                    break;
 
                                 //HAND_BLINDS
                                 case 'L':
@@ -255,31 +320,22 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                     //<RESULT WINTYPE="WINTYPE_HILO" PLAYER="ItalyToast" WIN="105.08" HAND="$(STR_BY_DEFAULT)" WINCARDS="" HANDEXT=" 8,7,5,2,A">
                     if (Line[1] == 'R')
                     {
-                        const int winTypeIndex = 8;
-                        string playerName;
-                        int playerEndIndex;
-                        if (Line[winTypeIndex] == 'W')
+                        string playerName = GetPlayerXMLAttributeValue(Line);
+
+                        decimal amount = Decimal.Parse(GetXMLAttributeValue(Line, "WIN"), provider);
+
+                        if (amount > 0)
                         {
-                            //OmahaHiLo
-                            const int winTypeStartIndex = 17;
-                            int winTypeEndIndex = Line.IndexOf('\"', winTypeStartIndex);
-                            int playerStartIndex = winTypeEndIndex + 10;
-                            playerEndIndex = Line.IndexOf('\"', playerStartIndex);
-                            playerName = Line.Substring(playerStartIndex, playerEndIndex - playerStartIndex);
+                            actions.Add(new WinningsAction(playerName, HandActionType.WINS, amount, 0));
                         }
                         else
                         {
-                            const int playerStartIndex = 16;
-                            playerEndIndex = Line.IndexOf('\"', playerStartIndex);
-                            playerName = Line.Substring(playerStartIndex, playerEndIndex - playerStartIndex);
-                        }
-
-                        int winAmountStartIndex = playerEndIndex + 7;
-                        decimal amount = GetActionAmount(Line, winAmountStartIndex);
-
-                        if (amount != 0)
-                        {
-                            actions.Add(new WinningsAction(playerName, HandActionType.WINS, amount, 0));
+                            const string MuckHand =  "$(STR_G_MUCK)";
+                            string hand = GetXMLAttributeValue(Line, "HAND");
+                            if (hand == MuckHand)
+                            {
+                                actions.Add(new HandAction(playerName, HandActionType.MUCKS, amount, Street.Showdown));
+                            }
                         }
                     }
                 }
@@ -288,7 +344,18 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             return actions;
         }
 
-        private Street ParseNextStreet(string Line)
+        static HandAction ParseAnte(string line)
+        {
+            var playerName = GetPlayerXMLAttributeValue(line);
+
+            var amountStr = GetXMLAttributeValue(line, "VALUE");
+
+            var amount = decimal.Parse(amountStr, provider);
+
+            return new HandAction(playerName, HandActionType.ANTE, amount, Street.Preflop);
+        }
+
+        static Street ParseNextStreet(string Line)
         {
             //<ACTION TYPE="HAND_BOARD" VALUE="BOARD_RIVER" POT="29.26" RAKE="0.74" MAINPOT="29.26" LEFTPOT="" RIGHTPOT="">
             const int StreetIdentiFierIndex = 39;
@@ -306,33 +373,33 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             }
         }
 
-        private HandAction ParseBlinds(string Line)
+        public static HandAction ParseBlinds(string Line)
         {
             //<ACTION TYPE="HAND_BLINDS" PLAYER="fatima1975" KIND="HAND_SB" VALUE="0.02"></ACTION>
             //<ACTION TYPE="HAND_BLINDS" PLAYER="gasmandean" KIND="HAND_BB" VALUE="0.04"></ACTION>
             const int playerNameStartIndex = 35;
+
             int playerNameEndIndex = Line.IndexOf('\"', playerNameStartIndex);
             string playerName = Line.Substring(playerNameStartIndex, playerNameEndIndex - playerNameStartIndex);
 
-            int amountStartIndex = playerNameEndIndex + 24;
-            int amountEndIndex = Line.IndexOf('\"', amountStartIndex);
-            string amountStr = Line.Substring(amountStartIndex, amountEndIndex - amountStartIndex);
+            string amountStr = GetXMLAttributeValue(Line, "VALUE");
             decimal amount = decimal.Parse(amountStr, provider);
 
-            int blindTypeIDIndex = playerNameEndIndex + 13;
-            char blindType = Line[blindTypeIDIndex];
+            char blindType = GetXMLAttributeValue(Line, "KIND")[5];
             switch (blindType)
             {
                 case 'S':
                     return new HandAction(playerName, HandActionType.SMALL_BLIND, amount, Street.Preflop);
                 case 'B':
                     return new HandAction(playerName, HandActionType.BIG_BLIND, amount, Street.Preflop);
+                case 'D':
+                    return new HandAction(playerName, HandActionType.POSTS, amount, Street.Preflop);
                 default:
                     throw new ArgumentException("Unknown blindType: " + blindType + " - " + Line);
             }
         }
 
-        private HandAction ParseAction(string Line, Street currentStreet, List<HandAction> actions)
+        static HandAction ParseAction(string Line, Street currentStreet, List<HandAction> actions)
         {
             const int playerHandActionStartIndex = 21;
             const int fixedAmountDistance = 9;
@@ -340,18 +407,19 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             char handActionType = Line[playerHandActionStartIndex];
             int playerNameStartIndex;
             string playerName;
+            int nameLength;
 
             switch (handActionType)
             {
                 //<ACTION TYPE="ACTION_ALLIN" PLAYER="SAMERRRR" VALUE="15972.51"></ACTION>
                 case 'A':
                     playerNameStartIndex = playerHandActionStartIndex + 15;
-                    playerName = GetActionPlayerName(Line, playerNameStartIndex);
-                    decimal amount = GetActionAmount(Line, playerNameStartIndex + playerName.Length + fixedAmountDistance);
+                    playerName = GetActionPlayerName(Line, playerNameStartIndex, out nameLength);
+                    decimal amount = GetActionAmount(Line, playerNameStartIndex + nameLength + fixedAmountDistance);
                     HandActionType allInType = AllInActionHelper.GetAllInActionType(playerName, amount, currentStreet, actions);
                     if (allInType == HandActionType.CALL)
                     {
-                        amount = AllInActionHelper.GetAdjustedCallAllInAmount(amount, actions.Player(playerName));
+                        amount = AllInActionHelper.GetAdjustedCallAllInAmount(amount, actions.Player(playerName).Street(currentStreet));
                     }
 
                     return new HandAction(playerName, allInType, amount, currentStreet, true);
@@ -359,11 +427,11 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 //<ACTION TYPE="ACTION_BET" PLAYER="ItalyToast" VALUE="600.00"></ACTION>
                 case 'B':
                     playerNameStartIndex = playerHandActionStartIndex + 13;
-                    playerName = GetActionPlayerName(Line, playerNameStartIndex);
+                    playerName = GetActionPlayerName(Line, playerNameStartIndex, out nameLength);
                     return new HandAction(
                         playerName,
                         HandActionType.BET,
-                        GetActionAmount(Line, playerNameStartIndex + playerName.Length + fixedAmountDistance),
+                        GetActionAmount(Line, playerNameStartIndex + nameLength + fixedAmountDistance),
                         currentStreet
                         );
 
@@ -373,7 +441,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                     if (Line[playerHandActionStartIndex + 1] == 'H')
                     {
                         playerNameStartIndex = playerHandActionStartIndex + 15;
-                        playerName = GetActionPlayerName(Line, playerNameStartIndex);
+                        playerName = GetActionPlayerName(Line, playerNameStartIndex, out nameLength);
                         return new HandAction(
                         playerName,
                         HandActionType.CHECK,
@@ -384,11 +452,11 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                     else
                     {
                         playerNameStartIndex = playerHandActionStartIndex + 14;
-                        playerName = GetActionPlayerName(Line, playerNameStartIndex);
+                        playerName = GetActionPlayerName(Line, playerNameStartIndex, out nameLength);
                         return new HandAction(
                         playerName,
                         HandActionType.CALL,
-                        GetActionAmount(Line, playerNameStartIndex + playerName.Length + fixedAmountDistance),
+                        GetActionAmount(Line, playerNameStartIndex + nameLength + fixedAmountDistance),
                         currentStreet
                         );
                     }
@@ -396,7 +464,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 //<ACTION TYPE="ACTION_FOLD" PLAYER="Belanak"></ACTION>
                 case 'F':
                     playerNameStartIndex = playerHandActionStartIndex + 14;
-                    playerName = GetActionPlayerName(Line, playerNameStartIndex);
+                    playerName = GetActionPlayerName(Line, playerNameStartIndex, out nameLength);
                     return new HandAction(
                         playerName,
                         HandActionType.FOLD,
@@ -407,11 +475,11 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 //<ACTION TYPE="ACTION_RAISE" PLAYER="ItalyToast" VALUE="400.00"></ACTION>
                 case 'R':
                     playerNameStartIndex = playerHandActionStartIndex + 15;
-                    playerName = GetActionPlayerName(Line, playerNameStartIndex);
+                    playerName = GetActionPlayerName(Line, playerNameStartIndex, out nameLength);
                     return new HandAction(
                         playerName,
                         HandActionType.RAISE,
-                        GetActionAmount(Line, playerNameStartIndex + playerName.Length + fixedAmountDistance),
+                        GetActionAmount(Line, playerNameStartIndex + nameLength + fixedAmountDistance),
                         currentStreet
                         );
 
@@ -420,17 +488,19 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             }
         }
 
-        decimal GetActionAmount(string Line, int startIndex)
+        static decimal GetActionAmount(string Line, int startIndex)
         {
             int endIndex = Line.IndexOf('\"', startIndex);
             string amountString = Line.Substring(startIndex, endIndex - startIndex);
             return decimal.Parse(amountString, provider);
         }
 
-        string GetActionPlayerName(string Line, int startIndex)
+        static string GetActionPlayerName(string Line, int startIndex, out int length)
         {
             int endIndex = Line.IndexOf('\"', startIndex);
-            return Line.Substring(startIndex, endIndex - startIndex);
+            string name = Line.Substring(startIndex, endIndex - startIndex);
+            length = name.Length;
+            return WebUtility.HtmlDecode(name);
         }
 
         private int getHandActionsStartIndex(string[] handLines)
@@ -464,8 +534,9 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 const int playerNameStartIndex = 14;
                 int playerNameEndIndex = Line.IndexOf('\"', playerNameStartIndex);
                 string playerName = Line.Substring(playerNameStartIndex, playerNameEndIndex - playerNameStartIndex);
+                playerName = WebUtility.HtmlDecode(playerName);
 
-                if (playerName == "UNKNOWN")
+                if (playerName == "UNKNOWN" || playerName == "")
                 {
                     continue;
                 }
@@ -478,7 +549,14 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 int stackEndIndex = Line.IndexOf('\"', stackStartIndex);
                 decimal stack = decimal.Parse(Line.Substring(stackStartIndex, stackEndIndex - stackStartIndex), provider);
 
-                plist.Add(new Player(playerName, stack, seatNumber));
+                var state = GetXMLAttributeValue(Line, "STATE");
+
+                bool sitout = IsSitOutState(state);
+
+                plist.Add(new Player(playerName, stack, seatNumber)
+                    {
+                        IsSittingOut = sitout
+                    });
             }
 
             //Parsing dealt cards
@@ -494,7 +572,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                     char actionTypeChar = Line[actionTypeCharIndex];
                     if (actionTypeChar == 'D')
                     {
-                        string playerName = GetXMLAttributeValue(Line, "PLAYER");
+                        string playerName = GetPlayerXMLAttributeValue(Line);
                         ParseDealtHand(handLines, i, plist[playerName]);
                     }
                 }
@@ -521,7 +599,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 {
                     const int playerNameStartIndex = 16;
                     int playerNameEndIndex = Line.IndexOf('\"', playerNameStartIndex);
-                    string playerName = Line.Substring(playerNameStartIndex, playerNameEndIndex - playerNameStartIndex);
+                    string playerName = GetPlayerXMLAttributeValue(Line);
                     Player player = plist[playerName];
 
                     if (!player.hasHoleCards)
@@ -555,7 +633,20 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             return plist;
         }
 
-        private void ParseDealtHand(string[] handLines, int currentLine, Player player)
+        private bool IsSitOutState(string state)
+        {
+            switch (state)
+            {
+                case "STATE_RESERVED":
+                case "STATE_SITOUT":
+                case "STATE_EMPTY":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        static void ParseDealtHand(string[] handLines, int currentLine, Player player)
         {
             const int maxCards = 4;
             for (int i = 1; i <= maxCards; i++)
@@ -671,7 +762,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
 	        #endregion
         };
 
-        private Card ParseCard(string Line)
+        static Card ParseCard(string Line)
         {
             //<CARD LINK="b"></CARD> is unkown card
             //<CARD LINK="13"></CARD>
@@ -691,10 +782,29 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
             return BossCardLookup[cardID];
         }
 
-        string GetXMLAttributeValue(string Line, string Name)
+        static string GetPlayerXMLAttributeValue(string Line)
+        {
+            var name = GetXMLAttributeValue(Line, "PLAYER");
+            return WebUtility.HtmlDecode(name);
+        }
+
+        /// <summary>
+        /// tries to find a XML attribute
+        /// </summary>
+        /// <param name="Line"></param>
+        /// <param name="Name"></param>
+        /// <returns>return the value of the attribute, if an attribute is not found, it returns null</returns>
+        static string GetXMLAttributeValue(string Line, string Name)
         {
             string search = " " + Name + "=\"";
-            int startIndex = Line.IndexOf(search) + search.Length;
+            int startIndex = Line.IndexOf(search);
+
+            if (startIndex == -1)
+            {
+                return null;
+            }
+
+            startIndex += search.Length;
             int endIndex = Line.IndexOf('\"', startIndex);
             return Line.Substring(startIndex, endIndex - startIndex);
         }
@@ -730,7 +840,7 @@ namespace HandHistories.Parser.Parsers.FastParser.BossMedia
                 if (line[1] == 'C' && line[12] != 'b')
                 {
                     string HeroNameLine = handlines[i - 1];
-                    return GetXMLAttributeValue(HeroNameLine, "PLAYER");
+                    return GetPlayerXMLAttributeValue(HeroNameLine);
                 }
             }
             return null;

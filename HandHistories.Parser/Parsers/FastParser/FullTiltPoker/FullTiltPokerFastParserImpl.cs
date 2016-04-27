@@ -14,6 +14,7 @@ using HandHistories.Objects.Hand;
 using HandHistories.Parser.Parsers.Base;
 using HandHistories.Parser.Utils.FastParsing;
 using HandHistories.Objects.Hand;
+using HandHistories.Parser.Utils.Uncalled;
 
 namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
 {
@@ -27,10 +28,18 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
         // we adjust the raise sizes on our own during FixUncalledBets
         public override bool RequiresAdjustedRaiseSizes
         {
-            get { return false; }
+            get { return true; }
         }
 
         public override bool SupportRunItTwice
+        {
+            get
+            {
+                return true;
+            }
+        }
+
+        public override bool RequiresUncalledBetFix
         {
             get
             {
@@ -330,14 +339,14 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
                 {
                     actions.Add(ParseUncalledBet(line, currentStreet));
                     ParseShowDown(handLines, ref actions, i + 1, gameType);
-                    return FixUncalledBets(actions, handHistory.TotalPot, handHistory.Rake);
+                    return actions;
                 }
 
                 if (line.Contains(" shows ["))
                 {
                     ParseShowDown(handLines, ref actions, i, GameType.Unknown);
 
-                    return FixUncalledBets(actions, handHistory.TotalPot, handHistory.Rake);
+                    return actions;
                 }
 
                 var lastChar = line[line.Length - 1];
@@ -412,7 +421,7 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
                     case '*':
                         ParseShowDown(handLines, ref actions, i, GameType.Unknown);
 
-                        return FixUncalledBets(actions, handHistory.TotalPot, handHistory.Rake);
+                        return actions;
 
                     //Dealt to FT_Hero [Qh 5c]
                     //Postrail shows [Qs Ah]
@@ -420,7 +429,16 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
                         if (line.IndexOf(" shows [", StringComparison.Ordinal) != -1)
                         {
                             ParseShowDown(handLines, ref actions, i, GameType.Unknown);
-                            return FixUncalledBets(actions, handHistory.TotalPot, handHistory.Rake);
+                            return actions;
+                        }
+                        continue;
+
+                    case 'e':
+                        if (line == "Players agree to Run It Twice")
+                        {
+                            i++;
+                            ParseRunItTwiceShowDown_Run1(handLines, ref actions, i);
+                            return actions;
                         }
                         continue;
 
@@ -431,7 +449,7 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
                 }
             }
 
-            return FixUncalledBets(actions, handHistory.TotalPot, handHistory.Rake);
+            return actions;
         }
 
         static bool IsChatLine(string line)
@@ -452,6 +470,40 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
             return true;
         }
 
+        public static void ParseRunItTwiceShowDown_Run1(string[] handLines, ref List<HandAction> actions, int lineIndex)
+        {
+            for (int i = lineIndex; i < handLines.Length; i++)
+            {
+                var line = handLines[i];
+
+                char lastChar = line[line.Length - 1];
+
+                if (lastChar == ']')
+                {
+                    actions.Add(ParseShowAction(line));
+                    continue;
+                }
+                else if (line == "*** SUMMARY ***")
+                {
+                    return;
+                }
+                else if (line.IndexOf(" wins pot 1 (", StringComparison.Ordinal) != -1)
+                {
+                    int nameEndIndex = line.IndexOf(" wins pot 1 (", StringComparison.Ordinal);
+
+                    string playerName = line.Remove(nameEndIndex);
+
+                    int amountStartIndex = line.IndexOf('(', nameEndIndex) + 1;
+                    int amountEndString = line.IndexOf(')', amountStartIndex);
+
+                    string amountString = line.Substring(amountStartIndex, amountEndString - amountStartIndex);
+
+                    decimal amount = ParseAmount(amountString);
+
+                    actions.Add(new WinningsAction(playerName, HandActionType.WINS, amount, 0));
+                }
+            }
+        }
 
         public void ParseShowDown(string[] handLines, ref List<HandAction> actions, int lineIndex, GameType gametype)
         {
@@ -459,11 +511,15 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
             {
                 var line = handLines[i];
 
+                if (line == "*** SUMMARY ***")
+                {
+                    return;
+                }
+
                 if (line.EndsWith(" mucks"))
                 {
                     actions.Add(new HandAction(line.Remove(line.Length - 6), HandActionType.MUCKS, 0m, Street.Showdown));
                 }
-
                 else if (line.Contains(" wins "))
                 {
                     int nameEndIndex = -1;
@@ -488,60 +544,27 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
                     int amountEndString = line.IndexOf(')', amountStartIndex);
 
                     string amountString = line.Substring(amountStartIndex, amountEndString - amountStartIndex);
-                    decimal amount = decimal.Parse(amountString, NumberStyles.AllowCurrencySymbol | NumberStyles.Number, NumberFormatInfo);
+
+                    decimal amount = ParseAmount(amountString);
 
                     actions.Add(new WinningsAction(playerName, HandActionType.WINS, amount, 0));
                 }
                 else if (line.Contains(" shows ["))
                 {
-                    int nameEndIndex = line.IndexOf(" shows [", StringComparison.Ordinal);
-                    string playerName = line.Remove(nameEndIndex);
-
-                    actions.Add(new HandAction(playerName, HandActionType.SHOW, 0m, Street.Showdown));
-                }
-
-#warning duplicate parse winning actions
-                //We already parse winning actions, or is this a better way to parse winning actions even though it's slower?
-                //
-                //else if (line.Contains(" and won "))
-                //{
-                //    // as it's not absolutely clear what the name is, we grab the name out of the seating list
-                //    //    Seat 6: Psipsis showed [Ad 5d] and won ($0.51) with a pair of Aces
-                //    //    Seat 6: Psipsis (big blind) showed [Ad 5d] and won ($0.51) with a pair of Aces
-                //    // -> Seat 6: Psipsis ($0.85)
-                //    string playerName = ObtainPlayerNameFromShowdownLine(handLines, i);
-                //    if (string.IsNullOrWhiteSpace(playerName)) continue;
-
-                //    int amountStartIndex = line.IndexOf('(', line.IndexOf(" and won ", StringComparison.Ordinal)) + 1;
-                //    int amountEndString = line.IndexOf(')', amountStartIndex);
-
-                //    string amountString = line.Substring(amountStartIndex, amountEndString - amountStartIndex);
-                //    decimal amount = decimal.Parse(amountString, NumberStyles.AllowCurrencySymbol | NumberStyles.Number, NumberFormatInfo);
-
-                //    actions.Add(new WinningsAction(playerName, HandActionType.WINS, amount, 0));
-
-                //}
-                else if (line.Contains(" collected ("))
-                {
-                    if (actions.Any(a => a.IsWinningsAction)) continue;
-                    // as it's not absolutely clear what the name is, we grab the name out of the seating list
-                    // Seat 2: dude6974 (small blind) collected ($0.10), mucked
-                    // Seat 7: tatskie100 collected ($3.35)
-                    string playerName = ObtainPlayerNameFromShowdownLine(handLines, i);
-                    if (string.IsNullOrWhiteSpace(playerName)) continue;
-
-                    int amountStartIndex = line.LastIndexOf('(') + 1;
-                    int amountEndString = line.IndexOf(')', amountStartIndex);
-
-                    string amountString = line.Substring(amountStartIndex, amountEndString - amountStartIndex);
-                    decimal amount = decimal.Parse(amountString, NumberStyles.AllowCurrencySymbol | NumberStyles.Number, NumberFormatInfo);
-
-                    actions.Add(new WinningsAction(playerName, HandActionType.WINS, amount, 0));
+                    actions.Add(ParseShowAction(line));
                 }
             }
         }
 
-        private string ObtainPlayerNameFromShowdownLine(string[] handLines, int index)
+        private static HandAction ParseShowAction(string line)
+        {
+            int nameEndIndex = line.IndexOf(" shows ", StringComparison.Ordinal);
+            string playerName = line.Remove(nameEndIndex);
+
+            return new HandAction(playerName, HandActionType.SHOW, 0m, Street.Showdown);
+        }
+
+        private static string ObtainPlayerNameFromShowdownLine(string[] handLines, int index)
         {
             var line = handLines[index];
             int seatIndex = line.LastIndexOf("Seat ", StringComparison.Ordinal);
@@ -688,6 +711,11 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
         {
             var amountString = line.Substring(startIndex);
             return decimal.Parse(amountString, NumberStyles.AllowCurrencySymbol | NumberStyles.Number, NumberFormatInfo);
+        }
+
+        static decimal ParseAmount(string line)
+        {
+            return decimal.Parse(line, NumberStyles.AllowCurrencySymbol | NumberStyles.Number, NumberFormatInfo);
         }
 
         static HandAction ParseFoldCheckLine(string line, Street currentStreet)
@@ -1014,6 +1042,11 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
             Seat 5: Naturalblow (small blind) folded before the Flop
             Seat 6: BeerMySole (big blind) folded before the Flop*/
 
+            //RunItTwice Hand Board look like this:
+            //*** SUMMARY 1 ***
+            //Pot 1 $311
+            //Board: [Td 3d 3h Qh Ac]
+
             for (int lineNumber = handLines.Length - 2; lineNumber >= 0; lineNumber--)
             {
                 string line = handLines[lineNumber];
@@ -1022,15 +1055,35 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
                     return BoardCards.ForPreflop();
                 }
 
-                if (line[0] != 'B')
+                if (line[0] == 'B')
                 {
-                    continue;
+                    //this is a RunItTwice hand
+                    if (handLines[lineNumber - 1][0] == 'P')
+                    {
+                        return ParseRunItTwiceFirstBoard(handLines, lineNumber - 1);
+                    }
+                    else
+                    {
+                        return ParseBoard(line);
+                    }
                 }
-
-                return ParseBoard(line);
             }
 
             throw new CardException(string.Empty, "Read through hand backwards and didn't find a board or summary.");
+        }
+
+        private BoardCards ParseRunItTwiceFirstBoard(string[] handLines, int startindex)
+        {
+            for (int i = startindex; i >= 0; i--)
+            {
+                string line = handLines[i];
+
+                if (line[0] == 'B')
+                {
+                    return ParseBoard(line);
+                }
+            }
+            throw new ArgumentException("RIT BoardCards not found");
         }
 
         private static BoardCards ParseBoard(string line)
@@ -1090,7 +1143,6 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
 
         public override RunItTwice ParseRunItTwice(string[] handLines)
         {
-            bool isRunItTwiceHand = false;
             int RITScanIndex = -1;
 
             for (int i = handLines.Length - 1; i > 0; i--)
@@ -1141,11 +1193,13 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
             for (int i = RITScanIndex; i < handLines.Length; i++)
             {
                 string line = handLines[i];
+                char lastChar = line[line.Length - 1];
 
-                if (line == "*** SUMMARY ***")
+                if (line.Contains(" shows "))
                 {
-                    break;
+                    RIT.Actions.Add(ParseShowAction(line));
                 }
+
                 int nameEndIndex = line.IndexOf(" wins pot 2 (", StringComparison.Ordinal);
                 if (nameEndIndex != -1)
                 {
@@ -1168,76 +1222,6 @@ namespace HandHistories.Parser.Parsers.FastParser.FullTiltPoker
         public int ParseGameActions(string[] handLines, ref List<HandAction> handActions, int firstActionIndex, out Street street)
         {
             throw new NotImplementedException();
-        }
-
-        private List<HandAction> FixUncalledBets(List<HandAction> handActions, decimal? totalPot, decimal? rake)
-        {
-            handActions = AdjustRaiseSizes(handActions);
-
-            // this fix only takes place when the TotalPot - Rake != Winnings
-            if (totalPot != null && rake != null)
-            {
-                var wagered = handActions.Where(a => !a.IsWinningsAction).Sum(a => a.Amount);
-                if (totalPot + wagered == 0m)
-                {
-                    return handActions;
-                }
-
-                var returnAmount = (decimal)(wagered + totalPot);
-                var playerToReturnTo = handActions.Where(a => a.IsGameAction).GroupBy(a => a.PlayerName)
-                                                        .Select(p => new
-                                                        {
-                                                            PlayerName = p.Key,
-                                                            Invested = p.Sum(x => x.Amount)
-                                                        }).OrderBy(x => x.Invested).First().PlayerName;
-
-                handActions.Add(new HandAction(playerToReturnTo, HandActionType.UNCALLED_BET, returnAmount, Street.Showdown));
-
-                return handActions;
-            }
-
-            var realActions = handActions.Where(a => a.IsGameAction && !a.IsWinningsAction && a.HandActionType != HandActionType.FOLD).ToList();
-
-            var lastAction = realActions[realActions.Count - 1];
-
-            // when the last action before summary is a bet, we need to return that bet to the according player
-            if (lastAction.HandActionType == HandActionType.BET)
-            {
-                //if(!handActions.Any(a => a.PlayerName == lastAction.PlayerName && a.HandActionType == HandActionType.UNCALLED_BET && a.Amount == -lastAction.Amount))
-                handActions.Add(new HandAction(lastAction.PlayerName, HandActionType.UNCALLED_BET, lastAction.Amount, Street.Showdown));
-            }
-
-            // when the last action before summary is a raise, we need to return the correct amount to the player
-            if (lastAction.HandActionType == HandActionType.RAISE)
-            {
-                // amount to return is the amount the raise player invested - the 2nd largest amount invested by a different player
-                var totalInvestedAmount = realActions.Where(a => a.PlayerName.Equals(lastAction.PlayerName)).Sum(a => a.Amount);
-
-                // now we need to get the maximum amount invested by a different player involved in the hand
-                var totalInvestedAmountOtherPlayer = realActions.Where(a => !a.PlayerName.Equals(lastAction.PlayerName)).GroupBy(a => a.PlayerName)
-                                                                .Select(p => new
-                                                                {
-                                                                    PlayerName = p.Key,
-                                                                    Invested = p.Sum(x => x.Amount)
-                                                                })
-                                                                .Min(x => x.Invested); // money invested is negative, so take the "max" negative value
-
-
-                handActions.Add(new HandAction(lastAction.PlayerName, HandActionType.UNCALLED_BET, totalInvestedAmount - totalInvestedAmountOtherPlayer, Street.Showdown));
-            }
-
-            // when the last action before the summary is the big blind, we need to return the difference between BB and SB
-            if (lastAction.HandActionType == HandActionType.BIG_BLIND)
-            {
-                // it can actually happen that there was no SB involved
-                var sbAction = realActions.FirstOrDefault(a => a.HandActionType == HandActionType.SMALL_BLIND);
-                var sbAmount = 0m;
-                if (sbAction != null) sbAmount = sbAction.Amount;
-
-                handActions.Add(new HandAction(lastAction.PlayerName, HandActionType.UNCALLED_BET, lastAction.Amount - sbAmount, Street.Showdown));
-            }
-
-            return handActions;
         }
     }
 }

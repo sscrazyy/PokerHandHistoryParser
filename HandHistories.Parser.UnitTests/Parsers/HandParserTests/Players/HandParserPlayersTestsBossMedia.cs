@@ -2,6 +2,7 @@
 using HandHistories.Objects.Cards;
 using HandHistories.Objects.Players;
 using NUnit.Framework;
+using System.Collections.Generic;
 
 namespace HandHistories.Parser.UnitTests.Parsers.HandParserTests.Players
 {
@@ -19,7 +20,10 @@ namespace HandHistories.Parser.UnitTests.Parsers.HandParserTests.Players
             {
                 return new PlayerList()
                            {
-                               new Player("mintkyss", 11111m, 1),
+                               new Player("mintkyss", 11111m, 1)
+                               {
+                                   IsSittingOut = true
+                               },
                                new Player("Phyre", 13922m, 2),
                                new Player("AllinAnna", 13510m, 3),
                                new Player("ItalyToast", 10000m, 4),
@@ -91,12 +95,67 @@ namespace HandHistories.Parser.UnitTests.Parsers.HandParserTests.Players
 
         protected override PlayerList ExpectedWithSittingOutPlayers
         {
-            get { throw new NotImplementedException(); }
+            get 
+            {
+                return new PlayerList()
+                {
+                    new Player("Player1", 56.95m, 1),
+                    new Player("HERO", 116.9m, 2)
+                    {
+                        HoleCards = HoleCards.FromCards("8h6sQdTh")
+                    },
+                    new Player("Player3", 120.86m, 3)
+                    {
+                        IsSittingOut = true
+                    },
+                };
+            }
         }
 
         protected override PlayerList ExpectedOmahaHiLoShowdownPlayers
         {
             get { throw new NotImplementedException(); }
+        }
+
+        [Test]
+        public void ParsePlayers_STATE_RESERVED()
+        {
+            var expected = new PlayerList(new List<Player>()
+            {
+                new Player("Player1", 0m, 1)
+                {
+                    IsSittingOut = true,
+                },
+                new Player("HERO", 175.44m, 2)
+                {
+                    HoleCards = HoleCards.FromCards("7c2dKd4s")
+                },
+                new Player("Player4", 466.18m, 4)
+                {
+                    IsSittingOut = true,
+                },
+                new Player("Player5", 202.34m, 5),
+            });
+
+            TestParsePlayers("STATE_RESERVED", expected);
+        }
+
+        [Test]
+        public void ParsePlayers_StrangePlayerName()
+        {
+            var expected = new PlayerList(new List<Player>()
+            {
+                new Player("&&££ÖÖ", 400m, 1),
+                new Player("L'POOL", 60m, 2),
+                new Player("Player3", 200m, 3)
+                {
+                    HoleCards = HoleCards.FromCards("JdJhKc7h")
+                },
+                new Player("Player4", 470m, 4),
+                new Player("Player5", 90m, 5),
+            });
+
+            TestParsePlayers("StrangePlayerNames", expected);
         }
     }
 }

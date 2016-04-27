@@ -15,8 +15,18 @@ namespace HandHistories.Objects.Actions
         [DataMember]
         public HandActionType HandActionType { get; protected set; }
 
+        /// <summary>
+        /// How much was added to the pot with this action.
+        /// If HandActionType is RAISE and the player have previously made a BET of 20 
+        /// and then makes a RAISE to 100 the amount is 80
+        /// </summary>
         [DataMember]
         public decimal Amount { get; private set; }
+
+        /// <summary>
+        /// Math.Abs(Amount)
+        /// </summary>
+        public decimal Absolute { get { return Math.Abs(Amount); } }
 
         [DataMember]
         public Street Street { get; private set; }
@@ -137,6 +147,8 @@ namespace HandHistories.Objects.Actions
                     return amount;
                 case HandActionType.POSTS:
                     return amount * -1;
+                case HandActionType.POSTS_DEAD:
+                    return amount * -1;
                 case HandActionType.ANTE:
                     return amount * -1;
                 case HandActionType.WINS_THE_LOW:
@@ -156,8 +168,7 @@ namespace HandHistories.Objects.Actions
         {
             get
             {
-                return HandActionType == HandActionType.RAISE ||
-                       IsAllInAction;
+                return HandActionType == HandActionType.RAISE;
             }
         }
 
@@ -165,11 +176,11 @@ namespace HandHistories.Objects.Actions
         {
             get
             {
-                return Street == Street.Preflop &&
-                       (HandActionType == HandActionType.RAISE || IsAllInAction);
+                return Street == Street.Preflop && HandActionType == HandActionType.RAISE;
             }
         }
 
+        [Obsolete]
         public bool IsAllInAction
         {
             get { return HandActionType == HandActionType.ALL_IN; }
@@ -192,18 +203,47 @@ namespace HandHistories.Objects.Actions
             get
             {
                 return HandActionType == HandActionType.RAISE ||                       
-                       HandActionType == HandActionType.BET ||
-                       IsAllInAction;
+                       HandActionType == HandActionType.BET;
             }
         }
 
+        /// <summary>
+        /// This includes all actions that you have to perform to be allowwed to play(BB/SS/ANTE)
+        /// </summary>
         public bool IsBlinds
         {
             get
             {
                 return HandActionType == HandActionType.SMALL_BLIND ||
                        HandActionType == HandActionType.BIG_BLIND ||
-                       HandActionType == HandActionType.POSTS;
+                       HandActionType == HandActionType.ANTE;
+            }
+        }
+
+        /// <summary>
+        /// All actions that can be performed before you are dealt a hand
+        /// </summary>
+        public bool IsPreGameAction
+        {
+            get
+            {
+                return HandActionType == HandActionType.SMALL_BLIND ||
+                       HandActionType == HandActionType.BIG_BLIND ||
+                       HandActionType == HandActionType.ANTE ||
+                       HandActionType == HandActionType.POSTS ||
+                       HandActionType == HandActionType.POSTS_DEAD;
+            }
+        }
+
+        /// <summary>
+        /// POSTS & POSTS_DEAD
+        /// </summary>
+        public bool IsPostAction
+        {
+            get
+            {
+                return HandActionType == HandActionType.POSTS ||
+                       HandActionType == HandActionType.POSTS_DEAD;
             }
         }
 
@@ -221,6 +261,14 @@ namespace HandHistories.Objects.Actions
                     HandActionType == Actions.HandActionType.ALL_IN ||
                     HandActionType == Actions.HandActionType.CALL ||
                     HandActionType == Actions.HandActionType.RAISE;
+            }
+        }
+
+        public bool IsDead
+        {
+            get
+            {
+                return HandActionType == Actions.HandActionType.POSTS_DEAD;
             }
         }
     }
