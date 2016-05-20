@@ -444,6 +444,10 @@ namespace HandHistories.Parser.Parsers.RegexParser.Base
             {
                 throw new CardException(handText, "ParseHoleCards: Exception " + ex.Message);
             }
-        }       
+        }
+
+        public HandHistory ParseFullHandHistory(string handText, List<string> warnings)
+        {
+        }
     }
 }

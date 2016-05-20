@@ -21,6 +21,7 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
         private static NLog.Logger logger = NLog.LogManager.GetCurrentClassLogger();
 
         private static readonly Regex HandSplitRegex = new Regex("\r\n\r\n", RegexOptions.Compiled);
+        private List<string> warnings;
 
         public abstract SiteName SiteName { get; }
 
@@ -167,6 +168,22 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
             return ParseFullHandHistory(handLines, rethrowExceptions);
         }
 
+        public HandHistory ParseFullHandHistory(string handText, List<string> warnings)
+        {
+            string[] handLines;
+            this.warnings = warnings;
+            try
+            {
+                handLines = SplitHandsLines(handText);
+            }
+            catch (Exception ex)
+            {
+                throw;
+            }
+
+            return ParseFullHandHistory(handLines, true);
+        }
+
         public HandHistory ParseFullHandHistory(string[] handLines, bool rethrowExceptions = false)
         {
             try
@@ -174,14 +191,20 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
                 bool isCancelled;
                 if (IsValidOrCancelledHand(handLines, out isCancelled) == false)
                 {
-                    throw new InvalidHandException(string.Join("\r\n", handLines));
+                    warnings.Add("Hand history is missing summary");
                 }
 
                 //Set members outside of the constructor for easier performance analysis
                 HandHistory handHistory = new HandHistory();
 
                 handHistory.FullHandHistoryText = string.Join("\r\n", handLines);
-                handHistory.DateOfHandUtc = ParseDateUtc(handLines);
+                try
+                {
+                    handHistory.DateOfHandUtc = ParseDateUtc(handLines);
+                }
+                catch {
+                    warnings.Add("Failed to parse date!");
+                }
                 handHistory.GameDescription = ParseGameDescriptor(handLines);
                 handHistory.HandId = ParseHandId(handLines);
                 handHistory.TableName = ParseTableName(handLines);
