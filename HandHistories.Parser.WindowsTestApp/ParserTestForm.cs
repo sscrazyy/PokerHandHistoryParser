@@ -59,11 +59,11 @@ namespace HandHistories.Parser.WindowsTestApp
                 SW.Start();
 
                 HandHistoryParserFastImpl fastParser = handParser as HandHistoryParserFastImpl;
-
+                var warnings = new List<string>();
                 var hands = fastParser.SplitUpMultipleHandsToLines(text);
                 foreach (var hand in hands)
                 {
-                    var parsedHand = fastParser.ParseFullHandHistory(hand, true);
+                    var parsedHand = fastParser.ParseFullHandHistory(string.Join("\n", hand), warnings);
                     parsedHands++;
                 }
 

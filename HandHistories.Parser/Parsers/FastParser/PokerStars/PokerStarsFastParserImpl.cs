@@ -597,9 +597,15 @@ namespace HandHistories.Parser.Parsers.FastParser.PokerStars
 
             actionIndex = ParseBlindActions(handLines, ref handActions, actionIndex);
 
-            Street currentStreet;
+            Street currentStreet = Street.Null;
 
-            actionIndex = ParseGameActions(handLines, ref handActions, actionIndex, out currentStreet);
+            //Add this for all implementations
+            try
+            {
+                actionIndex = ParseGameActions(handLines, ref handActions, actionIndex, out currentStreet);
+            }
+            catch {
+            }
 
             if (currentStreet == Street.Showdown)
             {

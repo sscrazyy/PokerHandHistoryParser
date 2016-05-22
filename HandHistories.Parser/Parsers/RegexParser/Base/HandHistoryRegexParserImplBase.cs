@@ -448,6 +448,7 @@ namespace HandHistories.Parser.Parsers.RegexParser.Base
 
         public HandHistory ParseFullHandHistory(string handText, List<string> warnings)
         {
+            return null;
         }
     }
 }

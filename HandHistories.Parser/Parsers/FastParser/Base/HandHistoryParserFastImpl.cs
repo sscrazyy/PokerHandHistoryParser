@@ -188,31 +188,83 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
         {
             try
             {
+                //Set members outside of the constructor for easier performance analysis
+                HandHistory handHistory = new HandHistory();
+                handHistory.FullHandHistoryText = string.Join("\r\n", handLines);
+
+                try
+                {
+                    handHistory.HandId = ParseHandId(handLines);
+                }
+                catch
+                {
+                    throw new HandIdException(handHistory.FullHandHistoryText, "Failed to parse hand id");
+                }
+
+
+                try
+                {
+                    handHistory.Players = ParsePlayers(handLines);
+                }
+                catch
+                {
+                    throw new PlayersException(handHistory.FullHandHistoryText, "Failed to parse players");
+                }
+
+                if (handHistory.Players.Count(p => p.IsSittingOut == false) <= 1)
+                {
+                    throw new PlayersException(handHistory.FullHandHistoryText, "Only found " + handHistory.Players.Count + " players with actions.");
+                }
+
+
                 bool isCancelled;
                 if (IsValidOrCancelledHand(handLines, out isCancelled) == false)
                 {
                     warnings.Add("Hand history is missing summary");
                 }
 
-                //Set members outside of the constructor for easier performance analysis
-                HandHistory handHistory = new HandHistory();
-
-                handHistory.FullHandHistoryText = string.Join("\r\n", handLines);
                 try
                 {
                     handHistory.DateOfHandUtc = ParseDateUtc(handLines);
                 }
-                catch {
-                    warnings.Add("Failed to parse date!");
+                catch
+                {
+                    warnings.Add("Failed to parse date");
                 }
                 handHistory.GameDescription = ParseGameDescriptor(handLines);
-                handHistory.HandId = ParseHandId(handLines);
-                handHistory.TableName = ParseTableName(handLines);
-                handHistory.DealerButtonPosition = ParseDealerPosition(handLines);
-                handHistory.ComumnityCards = ParseCommunityCards(handLines);
+
+                
+                try
+                {
+                    handHistory.TableName = ParseTableName(handLines);
+                }
+                catch
+                {
+                    warnings.Add("Failed to parse Table name");
+                }
+
+                try
+                {
+                    handHistory.DealerButtonPosition = ParseDealerPosition(handLines);
+                }
+                catch
+                {
+                    warnings.Add("Failed to determine dealer button");
+                }
+
+                try
+                {
+                    handHistory.ComumnityCards = ParseCommunityCards(handLines);
+                }
+                catch
+                {
+                    warnings.Add("Failed to determine community cards");
+                }
+
+               
                 handHistory.Cancelled = isCancelled;
-                handHistory.Players = ParsePlayers(handLines);
                 handHistory.NumPlayersSeated = handHistory.Players.Count;
+
 
                 string heroName = ParseHeroName(handLines);
                 handHistory.Hero = handHistory.Players.FirstOrDefault(p => p.PlayerName == heroName);
@@ -222,17 +274,24 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
                     return handHistory;
                 }
 
-                if (handHistory.Players.Count(p => p.IsSittingOut == false) <= 1)
-                {
-                    throw new PlayersException(string.Join("\r\n", handLines), "Only found " + handHistory.Players.Count + " players with actions.");
-                }
 
                 if (SupportRunItTwice)
                 {
                     handHistory.RunItTwiceData = ParseRunItTwice(handLines);
                 }
 
-                handHistory.HandActions = ParseHandActions(handLines, handHistory.GameDescription.GameType);
+                try
+                {
+                    //Add try catch for all implementations
+                    handHistory.HandActions = ParseHandActions(handLines, handHistory.GameDescription.GameType);
+                }
+                catch (InvalidHandException)
+                {
+                }
+                catch
+                {
+                    warnings.Add("Failed to parsed actions correctly");
+                }
 
                 if (RequiresActionSorting)
                 {
@@ -270,7 +329,7 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
                 }
                 catch (Exception)
                 {
-                    throw new ExtraHandParsingAction(handLines[0]);
+                    //throw new ExtraHandParsingAction(handLines[0]);
                 }
 
                 FinalizeHandHistory(handHistory);
@@ -386,7 +445,69 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
 
         protected GameDescriptor ParseGameDescriptor(string[] handLines)
         {
-            var format = ParsePokerFormat(handLines);
+            PokerFormat format = PokerFormat.CashGame; 
+            
+            try
+            {
+                format = ParsePokerFormat(handLines);
+            }
+            catch
+            {
+                warnings.Add("Failed to determine poker format");
+            }
+
+            GameType gameType = GameType.Unknown;
+            try
+            {
+                gameType = ParseGameType(handLines);
+            }
+            catch
+            {
+                warnings.Add("Failed to determine game type");
+            }
+
+            Limit limit = Limit.FromLimitEnum(LimitEnum.Any, Currency.All);
+            try
+            {
+                limit = ParseLimit(handLines);
+            }
+            catch
+            {
+                warnings.Add("Failed to parse limit");
+            }
+
+            TableType tableType = TableType.FromTableTypeDescriptions(TableTypeDescription.Any);
+            try
+            {
+                tableType = ParseTableType(handLines);
+            }
+            catch
+            {
+                warnings.Add("Failed to parse table type");
+            }
+
+            SeatType seatType = SeatType.AllSeatType();
+            try
+            {
+                seatType = ParseSeatType(handLines);
+            }
+            catch
+            {
+                warnings.Add("Failed to parse seat type");
+            }
+
+            Buyin buyin = Buyin.AllBuyin();
+            if (format != PokerFormat.CashGame)
+            {
+                try
+                {
+                    buyin = ParseBuyin(handLines);
+                }
+                catch
+                {
+                    warnings.Add("Failed to parse buyin");
+                }
+            }
 
 
             switch (format)
@@ -394,31 +515,31 @@ namespace HandHistories.Parser.Parsers.FastParser.Base
                 case PokerFormat.CashGame:
                     return new GameDescriptor(format,
                                          SiteName,
-                                         ParseGameType(handLines),
-                                         ParseLimit(handLines),
-                                         ParseTableType(handLines),
-                                         ParseSeatType(handLines));
+                                         gameType,
+                                         limit,
+                                         tableType,
+                                         seatType);
 
                 case PokerFormat.SitAndGo:
                     return new GameDescriptor(format,
                                        SiteName,
-                                       ParseGameType(handLines),
-                                       ParseLimit(handLines),
-                                       ParseBuyin(handLines),
-                                       ParseTableType(handLines),
-                                       ParseSeatType(handLines));
+                                       gameType,
+                                       limit,
+                                       buyin,
+                                       tableType,
+                                       seatType);
 
                 case PokerFormat.MultiTableTournament:
                     return new GameDescriptor(format,
                                         SiteName,
-                                        ParseGameType(handLines),
-                                        ParseLimit(handLines),
-                                        ParseBuyin(handLines),
-                                        ParseTableType(handLines),
-                                        ParseSeatType(handLines));
+                                        gameType,
+                                        limit,
+                                        buyin,
+                                        tableType,
+                                        seatType);
 
                 default:
-                    throw new PokerFormatException(handLines[0], "Unrecognized PokerFormat for our GameDescriptor:" + format);
+                    return null; //Should never happen
             }
         }
 
